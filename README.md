@@ -1,5 +1,6 @@
-# Parallel
 
+# Parallel
+https://stockx-zeta.vercel.app/
 A paper-trading and market-simulation terminal for the Indian equity market.
 
 **Paper trading only.** Every rupee, order, holding and P&L figure in this
