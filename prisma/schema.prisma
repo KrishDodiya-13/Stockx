@@ -1,0 +1,665 @@
+// Paper trading persistence.
+//
+// PAPER TRADING ONLY. Every monetary column in this schema holds *virtual*
+// money. No row here corresponds to a real brokerage account, a real order, or
+// a real holding, and nothing in this database can move real funds.
+//
+// Money representation
+// -------------------
+// All monetary amounts are stored as BigInt in integer *paise* (100 paise = ₹1),
+// and all per-share prices as BigInt in 1/10,000 of a rupee. This mirrors the
+// `Paise` / `PriceE4` types in src/lib/money.ts. Floating point is never used
+// for money anywhere in the system: it is the reason portfolio value, invested
+// value and P&L can never drift apart.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// A person using the platform.
+model User {
+  id    String  @id @default(cuid())
+  email String  @unique
+  name  String?
+
+  /// scrypt hash including its own salt and cost parameters. Never a plaintext
+  /// or fast-hashed password. Nullable only so pre-auth rows remain readable.
+  passwordHash String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  accounts Account[]
+  sessions Session[]
+
+  @@map("users")
+}
+
+/// A logged-in session.
+///
+/// The cookie carries a random token; this row stores only its SHA-256 hash,
+/// so a database leak does not hand out working sessions. Rows are deleted on
+/// sign-out and ignored once expired.
+model Session {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// SHA-256 of the session token, base64url. Unique so a token maps to at
+  /// most one session even under a race.
+  tokenHash String @unique
+
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  /// Diagnostic only — never used to authorise anything.
+  userAgent String?
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+/// A virtual trading account. Holds the cash balance; everything else is
+/// derived from holdings and live prices rather than stored.
+model Account {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name String @default("Paper account")
+
+  /// Virtual cash available to trade, in paise.
+  cashBalance BigInt
+
+  /// Total virtual capital ever put into this account, in paise — the initial
+  /// deposit plus every top-up since. Chosen by the user at sign-up (between
+  /// `MIN_INITIAL_DEPOSIT` and `MAX_TOTAL_DEPOSIT`) and only ever increases,
+  /// capped at `MAX_TOTAL_DEPOSIT` (₹10,00,000). This is also the denominator
+  /// for total return: it deliberately grows when the user adds funds, since a
+  /// return figure measured only against the original deposit would be wrong
+  /// the moment more capital enters the account.
+  startingCapital BigInt
+
+  /// Booked profit and loss across all closed quantity, in paise. Maintained
+  /// incrementally on each sell so it never has to be recomputed from history.
+  realisedPnl BigInt @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  holdings     Holding[]
+  positions    Position[]
+  orders       Order[]
+  trades       Trade[]
+  transactions Transaction[]
+  strategies   Strategy[]
+  simulations  RiskSimulation[]
+  backtests    Backtest[]
+  watchlist    Watchlist[]
+
+  @@index([userId])
+  @@map("accounts")
+}
+
+/// Current ownership of one instrument: how many shares, and at what average
+/// cost. One row per instrument the account currently holds.
+model Holding {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  instrumentId String
+  symbol       String
+
+  /// Shares currently owned. Never negative — shorting is not supported.
+  quantity Int
+
+  /// Weighted average purchase price, in 1/10,000 rupee.
+  averagePrice BigInt
+
+  /// quantity × averagePrice, in paise. Stored rather than derived so the
+  /// invested figure is exact rather than a re-rounded product.
+  investedValue BigInt
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// One holding per instrument per account — enforced by the database, not
+  /// only by application code, so a concurrent buy cannot create a duplicate.
+  @@unique([accountId, instrumentId])
+  @@index([accountId])
+  @@map("holdings")
+}
+
+/// An instrument a user is following.
+///
+/// Scoped to an account, like every other row a user owns, so the same
+/// `requireAccount()` guard that protects holdings and orders protects this —
+/// there is no second access-control path to get wrong. The previous
+/// implementation kept the watchlist in `localStorage`, which made it shared by
+/// everyone using the same browser and lost on any other device.
+///
+/// Deliberately holds no price. The watchlist records *what* is followed; what
+/// it is worth comes from the market-data service at read time, so a stale row
+/// can never be mistaken for a quote.
+model Watchlist {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  /// This app's instrument id, e.g. `NSE:RELIANCE`. Resolved against the
+  /// shared instrument registry, so the whole universe is supported.
+  instrumentId String
+
+  /// Denormalised for display and for reading the table directly. The registry
+  /// remains the source of truth.
+  symbol String
+
+  createdAt DateTime @default(now())
+
+  /// One row per instrument per account — enforced by the database, so two
+  /// concurrent taps on the star cannot create a duplicate.
+  @@unique([accountId, instrumentId])
+  @@index([accountId])
+  @@map("watchlist_items")
+}
+
+/// A round trip: opened when an instrument is first bought from flat, closed
+/// when the last share is sold. Distinct from Holding, which is only ever the
+/// current state — Position is the historical record that trade replay and
+/// Strategy DNA analyse later.
+model Position {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  instrumentId String
+  symbol       String
+
+  status PositionStatus @default(OPEN)
+
+  /// Shares still held in this position.
+  quantity Int
+
+  /// Total shares bought across the life of the position.
+  totalBought Int @default(0)
+
+  /// Total shares sold across the life of the position.
+  totalSold Int @default(0)
+
+  averageEntryPrice BigInt
+
+  /// Booked P&L for this position only, in paise.
+  realisedPnl BigInt @default(0)
+
+  openedAt DateTime  @default(now())
+  closedAt DateTime?
+
+  trades Trade[]
+
+  @@index([accountId, status])
+  @@index([accountId, instrumentId])
+  @@map("positions")
+}
+
+enum PositionStatus {
+  OPEN
+  CLOSED
+}
+
+/// An instruction to trade. Orders are the user's intent; Trades are what
+/// actually filled. A rejected or cancelled order never produces a Trade.
+model Order {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  instrumentId String
+  symbol       String
+
+  side   OrderSide
+  type   OrderType
+  status OrderStatus @default(PENDING)
+
+  /// Shares requested.
+  quantity Int
+
+  /// Shares filled so far.
+  filledQuantity Int @default(0)
+
+  /// Limit price in 1/10,000 rupee. Null for market orders.
+  limitPrice BigInt?
+
+  /// Volume-weighted average fill price, once filled.
+  averageFillPrice BigInt?
+
+  /// Why the order was rejected or cancelled. Null when it succeeded.
+  statusReason String?
+
+  placedAt    DateTime  @default(now())
+  filledAt    DateTime?
+  cancelledAt DateTime?
+
+  trades Trade[]
+
+  @@index([accountId, placedAt])
+  @@index([accountId, status])
+  @@map("orders")
+}
+
+enum OrderSide {
+  BUY
+  SELL
+}
+
+enum OrderType {
+  MARKET
+  LIMIT
+}
+
+enum OrderStatus {
+  /// Accepted but not yet executable — a limit order waiting for its price.
+  PENDING
+  PARTIALLY_FILLED
+  FILLED
+  CANCELLED
+  REJECTED
+}
+
+/// An execution. One fill of one order, at one price.
+model Trade {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  positionId String?
+  position   Position? @relation(fields: [positionId], references: [id])
+
+  instrumentId String
+  symbol       String
+
+  side     OrderSide
+  quantity Int
+
+  /// Execution price, in 1/10,000 rupee.
+  price BigInt
+
+  /// quantity × price, in paise.
+  value BigInt
+
+  /// Booked P&L on a sell, in paise. Always 0 for a buy: a purchase realises
+  /// nothing, it only establishes cost.
+  realisedPnl BigInt @default(0)
+
+  /// Whether a human or an automated strategy produced this trade.
+  source TradeSource @default(MANUAL)
+
+  executedAt DateTime @default(now())
+
+  @@index([accountId, executedAt])
+  @@index([accountId, instrumentId])
+  @@map("trades")
+}
+
+enum TradeSource {
+  MANUAL
+  STRATEGY
+}
+
+/// Cash ledger. Every movement of virtual cash gets a row, so the balance is
+/// always reconstructible from history and a discrepancy is traceable to the
+/// entry that caused it.
+model Transaction {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  type TransactionType
+
+  /// Signed change to cash, in paise. Negative for a debit.
+  amount BigInt
+
+  /// Cash balance immediately after this entry, in paise. Stored so the ledger
+  /// can be audited without replaying every prior row.
+  balanceAfter BigInt
+
+  /// The trade this entry settles, when applicable.
+  tradeId String?
+
+  description String
+
+  createdAt DateTime @default(now())
+
+  @@index([accountId, createdAt])
+  @@map("transactions")
+}
+
+enum TransactionType {
+  /// Initial virtual funding, chosen by the user at sign-up.
+  OPENING_BALANCE
+  /// A later top-up of virtual capital, subject to the lifetime deposit cap.
+  DEPOSIT
+  BUY
+  SELL
+}
+
+// ---------------------------------------------------------------------------
+// Strategies
+//
+// A strategy is an ordered list of rules, each an IF/THEN pair. Rules,
+// conditions and actions are separate tables rather than a JSON blob so they
+// can be queried, validated at the database level, and migrated safely as the
+// condition vocabulary grows.
+//
+// Nothing here executes. Persisting a strategy records intent; running one is
+// the execution engine's job.
+// ---------------------------------------------------------------------------
+
+model Strategy {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  name         String
+  instrumentId String
+  symbol       String
+  notes        String?
+
+  status StrategyStatus @default(DRAFT)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  activatedAt DateTime?
+  completedAt DateTime?
+
+  /// Highest price seen since this strategy opened its position, in 1/10,000
+  /// rupee. Trailing stops measure from here. Reset on each activation.
+  highWaterPrice BigInt?
+
+  /// When the runner last evaluated this strategy. Surfaced in the UI so a
+  /// stalled engine is visible rather than looking like a quiet market.
+  lastEvaluatedAt DateTime?
+
+  rules      StrategyRule[]
+  executions StrategyExecution[]
+
+  @@index([accountId, status])
+  @@index([accountId, instrumentId])
+  @@map("strategies")
+}
+
+/// A saved risk simulation — one planned trade.
+///
+/// Stores only the *inputs*. Every derived figure (maximum loss, risk/reward,
+/// exposure) is recomputed by `calculateRisk` on read, so a saved simulation can
+/// never drift out of step with the calculation engine, and a fix to the engine
+/// retroactively corrects every stored simulation.
+model RiskSimulation {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  name String
+
+  instrumentId String?
+  symbol       String?
+
+  /// Capital the position is measured against, in paise.
+  capital BigInt
+
+  /// Per-share prices in 1/10,000 rupee.
+  entryPrice  BigInt
+  targetPrice BigInt?
+  stopPrice   BigInt?
+
+  quantity Int
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([accountId, createdAt])
+  @@map("risk_simulations")
+}
+
+/// A saved backtest run.
+///
+/// Unlike RiskSimulation — which stores inputs and recomputes everything —
+/// this stores the *results* as well. A backtest is a record of what a specific
+/// strategy did over a specific window of historical data; re-deriving it later
+/// could produce different numbers if the strategy was since edited or the data
+/// source changed, and a saved record that quietly changes is worse than none.
+///
+/// Every figure here is a HISTORICAL SIMULATION. It excludes commission,
+/// slippage and liquidity, and is not a prediction of future results.
+model Backtest {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  name String
+
+  /// The strategy this ran, if it still exists. Kept nullable so deleting a
+  /// strategy does not erase the record of what it once did.
+  strategyId   String?
+  strategyName String
+
+  instrumentId String
+  symbol       String
+
+  /// Window covered, epoch ms.
+  fromTime BigInt
+  toTime   BigInt
+  interval String
+
+  initialCapital BigInt
+  finalEquity    BigInt
+
+  totalReturn        BigInt
+  totalReturnPercent Float
+
+  tradeCount Int
+  winCount   Int
+  lossCount  Int
+  winRate    Float
+
+  /// Null when there were no losing trades — see the engine's note on why an
+  /// infinite profit factor is not reported as a number.
+  profitFactor Float?
+
+  maxDrawdown        BigInt
+  maxDrawdownPercent Float
+
+  averageTrade BigInt
+  bestTrade    BigInt?
+  worstTrade   BigInt?
+
+  /// Round trips, as recorded at run time.
+  trades Json
+
+  createdAt DateTime @default(now())
+
+  @@index([accountId, createdAt])
+  @@map("backtests")
+}
+
+enum StrategyStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+model StrategyRule {
+  id         String   @id @default(cuid())
+  strategyId String
+  strategy   Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+
+  kind RuleKind @default(CUSTOM)
+
+  /// Execution order within the strategy. Lower runs first.
+  sortOrder Int
+
+  /// How this rule's conditions combine.
+  operator LogicOperator @default(AND)
+
+  /// Trail distance in percent, for TRAILING_STOP rules only.
+  trailPercent Float?
+
+  enabled Boolean @default(true)
+
+  /// When this rule last fired, or null if it has not fired since the strategy
+  /// was activated.
+  ///
+  /// This is the duplicate-execution guard. A target rule stays true on every
+  /// tick once price passes its level, so without a fired marker the engine
+  /// would sell the same 50 shares on every evaluation. The runner claims a
+  /// rule with a conditional update (`WHERE firedAt IS NULL`), which is atomic
+  /// at the database level and therefore safe even if two runner invocations
+  /// overlap.
+  firedAt DateTime?
+
+  /// How many times this rule has fired across all activations. Diagnostic
+  /// only — `firedAt` is what gates execution.
+  fireCount Int @default(0)
+
+  conditions StrategyCondition[]
+  actions    StrategyAction[]
+  executions StrategyExecution[]
+
+  @@index([strategyId, sortOrder])
+  @@map("strategy_rules")
+}
+
+enum RuleKind {
+  ENTRY
+  TARGET
+  STOP
+  TRAILING_STOP
+  CUSTOM
+}
+
+enum LogicOperator {
+  AND
+  OR
+}
+
+model StrategyCondition {
+  id     String       @id @default(cuid())
+  ruleId String
+  rule   StrategyRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  type ConditionType
+
+  /// Threshold. Prices are in 1/10,000 rupee; percentages are plain numbers;
+  /// volume is a share count. The condition type determines which.
+  value Float
+
+  /// Look-back for indicator conditions (RSI 14, MA 50). Null otherwise.
+  period Int?
+
+  sortOrder Int @default(0)
+
+  @@index([ruleId])
+  @@map("strategy_conditions")
+}
+
+enum ConditionType {
+  PRICE_ABOVE
+  PRICE_BELOW
+  PRICE_REACHES
+  PERCENT_INCREASE
+  PERCENT_DECREASE
+  VOLUME_ABOVE
+  RSI_ABOVE
+  RSI_BELOW
+  MACD_CROSSES_ABOVE
+  MACD_CROSSES_BELOW
+  PRICE_ABOVE_MA
+  PRICE_BELOW_MA
+  BOLLINGER_UPPER_BREAK
+  BOLLINGER_LOWER_BREAK
+  PORTFOLIO_PNL_ABOVE
+  PORTFOLIO_PNL_BELOW
+  POSITION_PNL_ABOVE
+  POSITION_PNL_BELOW
+}
+
+model StrategyAction {
+  id     String       @id @default(cuid())
+  ruleId String
+  rule   StrategyRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  type ActionType
+
+  /// Shares for BUY/SELL, percent for SELL_PERCENT, null for SELL_ALL.
+  quantity Float?
+
+  sortOrder Int @default(0)
+
+  @@index([ruleId])
+  @@map("strategy_actions")
+}
+
+enum ActionType {
+  BUY
+  SELL
+  SELL_PERCENT
+  SELL_ALL
+}
+
+/// An execution-engine event.
+///
+/// Every attempt is logged, not only the successful ones. A rule that fired but
+/// whose order was rejected for insufficient cash is exactly the thing a user
+/// needs to see, and discarding it would make the strategy look like it simply
+/// never triggered.
+model StrategyExecution {
+  id         String   @id @default(cuid())
+  strategyId String
+  strategy   Strategy @relation(fields: [strategyId], references: [id], onDelete: Cascade)
+
+  ruleId String?
+  rule   StrategyRule? @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+
+  outcome ExecutionOutcome
+
+  side     OrderSide?
+  quantity Int?
+
+  /// Fill price in 1/10,000 rupee, when an order was placed and filled.
+  price BigInt?
+
+  /// The order this execution produced, if any.
+  orderId String?
+
+  /// Why the rule fired, or why it did not execute.
+  detail String
+
+  createdAt DateTime @default(now())
+
+  @@index([strategyId, createdAt])
+  @@map("strategy_executions")
+}
+
+enum ExecutionOutcome {
+  /// An order was placed and filled.
+  EXECUTED
+  /// The rule fired but the paper trading engine refused the order.
+  REJECTED
+  /// The rule fired but produced no actionable quantity.
+  SKIPPED
+  /// Lifecycle note: activated, completed, position flat, and so on.
+  INFO
+}

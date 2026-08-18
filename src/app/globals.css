@@ -1,0 +1,567 @@
+@import "tailwindcss";
+
+/* Theme is explicit (data-theme on <html>), never a media-query guess, so the
+   toggle wins in both directions. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* ==========================================================================
+   Tokens
+
+   The palette is deliberately monochrome. Green and red are *reserved* for
+   market direction — nothing decorative may use them, so a flash of colour on
+   screen always means a price moved.
+   ========================================================================== */
+
+:root {
+  /* Surfaces, from furthest back to closest to the reader. */
+  --surface-base: 250 249 246;      /* warm paper */
+  --surface-raised: 255 255 255;
+  --surface-sunken: 243 241 236;
+  --surface-inverse: 10 10 11;
+
+  /* Ink */
+  --ink-primary: 12 12 13;
+  --ink-secondary: 90 89 85;
+  /* 4.84:1 on warm paper — AA for normal text, matching the dark theme's
+     tertiary so captions read equally in both. */
+  --ink-tertiary: 112 110 104;
+  --ink-inverse: 250 249 246;
+
+  /* Hairlines. Fine borders, never heavy dividers. */
+  --line-subtle: 0 0 0 / 0.07;
+  --line-default: 0 0 0 / 0.12;
+  --line-strong: 0 0 0 / 0.24;
+
+  /* Market direction. Darker than the dark theme's equivalents because they
+     sit on paper — both clear AA for normal text (5.03:1 and 5.16:1). */
+  --signal-up: 0 124 68;
+  --signal-down: 200 45 42;
+  --signal-flat: 112 110 104;
+
+  /* Editorial accent — a warm sand used for marks and rules, not for chrome.
+     Deepened to 5.01:1 so it is legible as text, not only as a swatch. */
+  --accent: 142 99 48;
+
+  --glass-bg: 255 255 255 / 0.62;
+  --glass-border: 0 0 0 / 0.08;
+
+  --grain-opacity: 0.035;
+
+  /* Fractal-noise tile, inlined so the texture costs no request. */
+  --grain-texture: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  /* Dark is the primary experience. Near-black, very slightly warm, so the
+     off-white text reads as paper rather than as glare. */
+  --surface-base: 9 9 10;
+  --surface-raised: 18 18 20;
+  --surface-sunken: 5 5 6;
+  --surface-inverse: 250 249 246;
+
+  --ink-primary: 244 243 240;
+  --ink-secondary: 150 148 143;
+  /* 4.64:1 on the base surface — AA for normal text. Tertiary ink carries the
+     11px captions throughout the app, so it has to clear the small-text bar,
+     not the large-text one. */
+  --ink-tertiary: 124 122 117;
+  --ink-inverse: 10 10 11;
+
+  --line-subtle: 255 255 255 / 0.06;
+  --line-default: 255 255 255 / 0.12;
+  --line-strong: 255 255 255 / 0.26;
+
+  /* Controlled emerald and red. Deliberately desaturated from the usual
+     trading-app neon: at 4.5:1+ against the base they read as confident
+     rather than alarming, and they never glow. */
+  --signal-up: 46 191 118;
+  --signal-down: 240 87 82;
+  --signal-flat: 103 101 97;
+
+  /* The one distinctive accent — warm sand. Used for marks, the active
+     playhead and non-directional emphasis. Never for profit or loss, so it
+     can never be confused with a market signal. */
+  --accent: 212 166 94;
+
+  --glass-bg: 255 255 255 / 0.04;
+  --glass-border: 255 255 255 / 0.09;
+
+  --grain-opacity: 0.055;
+
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-base: rgb(var(--surface-base));
+  --color-raised: rgb(var(--surface-raised));
+  --color-sunken: rgb(var(--surface-sunken));
+  --color-inverse: rgb(var(--surface-inverse));
+
+  --color-ink: rgb(var(--ink-primary));
+  --color-ink-secondary: rgb(var(--ink-secondary));
+  --color-ink-tertiary: rgb(var(--ink-tertiary));
+  --color-ink-inverse: rgb(var(--ink-inverse));
+
+  --color-line: rgb(var(--line-default));
+  --color-line-subtle: rgb(var(--line-subtle));
+  --color-line-strong: rgb(var(--line-strong));
+
+  --color-up: rgb(var(--signal-up));
+  --color-down: rgb(var(--signal-down));
+  --color-flat: rgb(var(--signal-flat));
+  --color-accent: rgb(var(--accent));
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", monospace;
+
+  /* Editorial display scale. Clamps so the hero holds its proportions from
+     360px to ultrawide without a stack of breakpoint overrides. */
+  --text-display-xl: clamp(3.75rem, 15vw, 15rem);
+  --text-display-xl--line-height: 0.82;
+  --text-display-xl--letter-spacing: -0.045em;
+  --text-display-xl--font-weight: 600;
+
+  --text-display-l: clamp(2.75rem, 8vw, 7rem);
+  --text-display-l--line-height: 0.9;
+  --text-display-l--letter-spacing: -0.035em;
+  --text-display-l--font-weight: 600;
+
+  --text-display-m: clamp(2rem, 4.5vw, 3.75rem);
+  --text-display-m--line-height: 1;
+  --text-display-m--letter-spacing: -0.03em;
+  --text-display-m--font-weight: 550;
+
+  /* --- financial figure scale ------------------------------------------
+     The number is the content; its label is metadata. These sizes exist so a
+     balance visually dominates the word above it rather than matching it. */
+
+  /* The single hero figure on a screen — portfolio value, or a stock's price. */
+  --text-numeric-hero: clamp(3rem, 8vw, 6.5rem);
+  --text-numeric-hero--line-height: 0.9;
+  --text-numeric-hero--letter-spacing: -0.045em;
+  --text-numeric-hero--font-weight: 500;
+
+  --text-numeric-xl: clamp(2.5rem, 7vw, 6rem);
+  --text-numeric-xl--line-height: 0.95;
+  --text-numeric-xl--letter-spacing: -0.04em;
+
+  /* Stat tiles: large enough to read across a room, small enough to grid. */
+  --text-numeric-l: clamp(1.75rem, 3vw, 2.5rem);
+  --text-numeric-l--line-height: 1;
+  --text-numeric-l--letter-spacing: -0.03em;
+  --text-numeric-l--font-weight: 500;
+
+  --text-numeric-m: 1.25rem;
+  --text-numeric-m--line-height: 1.1;
+  --text-numeric-m--letter-spacing: -0.02em;
+
+  --text-eyebrow: 0.6875rem;
+  --text-eyebrow--line-height: 1;
+  --text-eyebrow--letter-spacing: 0.18em;
+  --text-eyebrow--font-weight: 500;
+
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out-quart: cubic-bezier(0.76, 0, 0.24, 1);
+}
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
+
+@layer base {
+  * {
+    border-color: rgb(var(--line-default));
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    /* Lenis drives scrolling; native smooth scroll would fight it. */
+    scroll-behavior: auto;
+  }
+
+  body {
+    background-color: rgb(var(--surface-base));
+    color: rgb(var(--ink-primary));
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "cv01";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+
+  /* Financial figures never reflow as digits change. */
+  .tabular,
+  [data-numeric] {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum", "zero";
+  }
+
+  ::selection {
+    background-color: rgb(var(--ink-primary));
+    color: rgb(var(--ink-inverse));
+  }
+
+  :focus-visible {
+    outline: 2px solid rgb(var(--ink-primary));
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+
+  /* Scrollbar, dimmed to stay out of the composition. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgb(var(--line-strong));
+    border: 3px solid rgb(var(--surface-base));
+    border-radius: 99px;
+  }
+}
+
+/* ==========================================================================
+   Utilities
+   ========================================================================== */
+
+@utility grain {
+  position: relative;
+  isolation: isolate;
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 50;
+    pointer-events: none;
+    opacity: var(--grain-opacity);
+    background-image: var(--grain-texture);
+    background-size: 180px 180px;
+    mix-blend-mode: overlay;
+  }
+}
+
+@utility glass {
+  background-color: rgb(var(--glass-bg));
+  border: 1px solid rgb(var(--glass-border));
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+}
+
+/*
+  The surface every floating menu sits on.
+
+  Distinct from `glass` on purpose. Glass is translucent by design — it is what
+  lets content scroll visibly under the sticky header and the mobile nav, and
+  that effect is wanted there. A menu is the opposite case: it must obscure
+  whatever it covers, or the list becomes unreadable against a table behind it.
+  The dropdown was reusing `glass`, whose dark value is 4% white, so the rows
+  underneath showed straight through.
+
+  Opaque because it is built on `--surface-raised`, which is a solid colour in
+  both themes rather than an alpha over the page.
+*/
+@utility popover-surface {
+  background-color: rgb(var(--surface-raised));
+  border: 1px solid rgb(var(--line-default));
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.16),
+    0 12px 28px -8px rgb(0 0 0 / 0.36);
+}
+
+@utility hairline-t {
+  border-top: 1px solid rgb(var(--line-subtle));
+}
+
+@utility hairline-b {
+  border-bottom: 1px solid rgb(var(--line-subtle));
+}
+
+@utility eyebrow {
+  font-size: var(--text-eyebrow);
+  line-height: 1;
+  letter-spacing: 0.18em;
+  font-weight: 500;
+  text-transform: uppercase;
+  color: rgb(var(--ink-tertiary));
+}
+
+/* Editorial page gutter, consistent across every section. */
+@utility gutter {
+  padding-inline: 1.25rem;
+
+  @media (min-width: 768px) {
+    padding-inline: 2.5rem;
+  }
+
+  @media (min-width: 1280px) {
+    padding-inline: 4rem;
+  }
+}
+
+/* ==========================================================================
+   Motion primitives
+
+   GSAP sets the final state, but elements must start hidden without waiting
+   for JS — otherwise there is a flash of fully-laid-out content before the
+   reveal runs. `[data-animate]` handles that, and unsets itself when JS is
+   unavailable or motion is reduced.
+   ========================================================================== */
+
+[data-animate] {
+  opacity: 0;
+  will-change: transform, opacity;
+}
+
+[data-animate="rise"] {
+  transform: translate3d(0, 2rem, 0);
+}
+
+/*
+  A masked line: a clipping wrapper with the text translated below it.
+
+  The wrapper must stay opaque. The reveal is the child sliding up inside
+  `overflow: hidden`, and the child is already invisible because it is clipped —
+  so hiding the wrapper as well adds nothing.
+
+  It also broke the page. `[data-animate]` above sets `opacity: 0` on every
+  animated element including this wrapper, but the entrance timeline animates
+  `[data-animate="mask"] > *` — the *children*. Nothing ever restored the
+  wrapper, so every masked headline stayed at zero opacity permanently: the
+  landing page's "TRADE / WITHOUT / RISK." rendered as a full-height blank gap.
+
+  It hid from every check made before a browser was involved, because the two
+  overrides below — reduced motion and no-JS — both reset the wrapper and were
+  the paths being tested. The bug only appeared with JS enabled and motion not
+  reduced, which is what almost every visitor gets.
+
+  `[data-animate="rule"]` restores its own opacity for the same reason.
+*/
+[data-animate="mask"] {
+  opacity: 1;
+}
+
+[data-animate="mask"] > * {
+  display: block;
+  transform: translate3d(0, 105%, 0);
+}
+
+/* A rule that draws itself in. Visible but unscaled, so the reduced-motion and
+   no-JS resets below restore it to full width rather than leaving it hidden. */
+[data-animate="rule"] {
+  opacity: 1;
+  transform: scaleX(0);
+  transform-origin: left;
+}
+
+.js-ready [data-animate] {
+  will-change: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-animate],
+  [data-animate="rise"],
+  [data-animate="mask"] > * {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* No JS: never leave the page invisible. */
+.no-js [data-animate],
+.no-js [data-animate="mask"] > * {
+  opacity: 1;
+  transform: none;
+}
+
+/*
+  Price change tint.
+
+  Phase 5 replaced the background flash with a directional nudge in
+  `AnimatedNumber` — a figure that lifts on a rise and drops on a fall. This
+  tint remains as a *secondary* cue on the same element, at low opacity, so a
+  change is perceivable without relying on motion alone (a reduced-motion user
+  gets no nudge) and without relying on colour alone (the nudge and the sign
+  carry it for a colour-blind reader).
+*/
+@keyframes tint-up {
+  0% {
+    background-color: rgb(var(--signal-up) / 0.14);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+@keyframes tint-down {
+  0% {
+    background-color: rgb(var(--signal-down) / 0.14);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+[data-direction="up"] {
+  animation: tint-up 700ms var(--ease-out-expo);
+}
+
+[data-direction="down"] {
+  animation: tint-down 700ms var(--ease-out-expo);
+}
+
+/* ==========================================================================
+   Custom cursor
+
+   Applied only while the custom cursor is active (fine pointer, motion
+   allowed). Text-entry elements keep their I-beam and the chart keeps its
+   crosshair — a decorative cursor must not remove a real affordance.
+   ========================================================================== */
+
+.custom-cursor,
+.custom-cursor * {
+  cursor: none;
+}
+
+.custom-cursor input:not([type="button"]):not([type="submit"]):not([type="range"]),
+.custom-cursor textarea,
+.custom-cursor [contenteditable="true"] {
+  cursor: text;
+}
+
+.custom-cursor [data-cursor="chart"],
+.custom-cursor [data-cursor="chart"] * {
+  cursor: crosshair;
+}
+
+.custom-cursor input[type="range"] {
+  cursor: pointer;
+}
+
+/*
+  Opt back into the pointer.
+
+  `.custom-cursor *` hides the native cursor everywhere so the custom one can
+  stand in for it. That is the intended effect over most of the page, but on a
+  cluster of small controls it removes the one signal that says "this is
+  clickable" — the Time Machine speed buttons read as inert without it.
+
+  Opt-in rather than a blanket `button { cursor: pointer }`, so the custom
+  cursor remains the rule and this stays a deliberate exception.
+*/
+.custom-cursor [data-cursor="pointer"],
+.custom-cursor [data-cursor="pointer"] * {
+  cursor: pointer;
+}
+
+/* ==========================================================================
+   Depth and hover
+
+   Depth comes from hairlines and surface tone, not from shadows. A drop shadow
+   on a dense data panel reads as a floating card; a warming border reads as
+   the panel coming forward, which is what a terminal wants.
+   ========================================================================== */
+
+@utility lift {
+  transition:
+    border-color 400ms var(--ease-out-expo),
+    background-color 400ms var(--ease-out-expo),
+    transform 400ms var(--ease-out-expo);
+
+  &:hover {
+    border-color: rgb(var(--line-strong));
+    transform: translateY(-1px);
+  }
+}
+
+/* An interactive row: the surface warms rather than the text moving. */
+@utility row-hover {
+  transition: background-color 260ms var(--ease-out-expo);
+
+  &:hover {
+    background-color: rgb(var(--ink-primary) / 0.035);
+  }
+}
+
+/*
+  Links and buttons settle rather than snap. 1px of travel is enough to read as
+  responsive; more reads as the control avoiding the pointer.
+*/
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  a:not([class*="rounded-full"]):hover,
+  button:not([disabled]):not([class*="rounded-full"]):hover {
+    transition: color 220ms var(--ease-out-expo);
+  }
+}
+
+/* ==========================================================================
+   Touch targets
+
+   A 28px icon button is fine for a cursor and too small for a fingertip; the
+   widely used floor is around 44px. Rather than inflate the visual size — which
+   would make dense toolbars balloon — this expands the *hit area* with a
+   pseudo-element, leaving the layout untouched.
+
+   Applied only where a coarse pointer is present, so desktop toolbars keep
+   their compact spacing and cannot accidentally overlap.
+   ========================================================================== */
+
+@utility touch-target {
+  position: relative;
+
+  @media (pointer: coarse) {
+    &::before {
+      content: "";
+      position: absolute;
+      /* Expands a 28px control to 44px, a 36px control to 52px. */
+      inset: -0.5rem;
+    }
+  }
+}
+
+/* Progress sweep on an in-flight action. */
+@keyframes sweep {
+  0% {
+    transform: scaleX(0);
+    opacity: 1;
+  }
+  60% {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scaleX(1);
+    opacity: 0;
+  }
+}
+
+@keyframes marquee {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+.marquee-track {
+  animation: marquee var(--marquee-duration, 60s) linear infinite;
+}
+
+.marquee:hover .marquee-track {
+  animation-play-state: paused;
+}
