@@ -31,13 +31,80 @@ model User {
   /// or fast-hashed password. Nullable only so pre-auth rows remain readable.
   passwordHash String?
 
+  /// When this address was proven to belong to the person using it.
+  ///
+  /// Null means unproven, and sign-in refuses it. A timestamp rather than a
+  /// boolean because "when" answers support questions a "true" cannot, and
+  /// costs the same. Set by clicking the emailed link, or immediately for a
+  /// Google sign-in, where Google has already done the proving.
+  ///
+  /// Every account that existed before verification was introduced was
+  /// backfilled in the migration, so nobody was locked out of an account they
+  /// already had.
+  emailVerifiedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   accounts Account[]
   sessions Session[]
 
+  passwordResetOtps       PasswordResetOtp[]
+  emailVerificationTokens EmailVerificationToken[]
+  oauthAccounts           OAuthAccount[]
+
   @@map("users")
+}
+
+/// A third-party identity linked to a user.
+///
+/// One row per provider account, so a person can hold a Google identity and a
+/// password on the same user without either being a separate account.
+///
+/// ── Why the link is by provider id, not by email ───────────────────────────
+///
+/// The email is how a returning Google user is *matched* to an existing
+/// account, but the id is what the link is stored against. Emails get
+/// reassigned and can be changed at the provider; the subject id cannot, so
+/// only it can safely say "this is the same person as last time".
+model OAuthAccount {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Lowercase provider name, e.g. "google".
+  provider          String
+  /// The provider's own immutable identifier for the account — Google's `sub`.
+  providerAccountId String
+
+  createdAt DateTime @default(now())
+
+  /// One identity cannot be claimed by two users.
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("oauth_accounts")
+}
+
+/// A pending email verification.
+///
+/// The emailed link carries a random 256-bit token; this row stores only its
+/// SHA-256 hash, exactly as sessions and reset codes do. Spent rather than
+/// deleted on use, so a replayed link is distinguishable from an expired one.
+model EmailVerificationToken {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// SHA-256 of the verification token, base64url.
+  tokenHash String @unique
+
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("email_verification_tokens")
 }
 
 /// A logged-in session.
@@ -63,6 +130,41 @@ model Session {
   @@index([userId])
   @@index([expiresAt])
   @@map("sessions")
+}
+
+/// A pending password reset, as a one-time code.
+///
+/// ── Why the hash is not unique here, unlike a session token ────────────────
+///
+/// A 256-bit token can carry a global unique index because a collision is
+/// impossible in practice. A six-digit code cannot: with a million values,
+/// two users holding the same code at once is ordinary, and a unique index
+/// would refuse to issue the second one. So a code is looked up by *user* and
+/// then compared, never by hash alone — which is also why an attacker cannot
+/// use a guessed code without knowing whose account it belongs to.
+///
+/// `attempts` is what makes a six-digit secret defensible at all. A code with
+/// a million possibilities and unlimited guesses is not a secret; capped at a
+/// handful of tries inside a ten-minute window, it is.
+model PasswordResetOtp {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// SHA-256 of the six-digit code, base64url. The code itself is only ever in
+  /// the email and in the user's hands — never stored and never logged.
+  codeHash String
+
+  expiresAt DateTime
+  /// Set the moment the code is spent. A non-null value means it is dead.
+  usedAt    DateTime?
+  /// Incorrect guesses so far. At the cap the code is burned.
+  attempts  Int       @default(0)
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("password_reset_otps")
 }
 
 /// A virtual trading account. Holds the cash balance; everything else is

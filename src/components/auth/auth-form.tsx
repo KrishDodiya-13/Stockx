@@ -1,8 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
+import { AuthDivider, GoogleButton } from "@/components/auth/google-button";
 import { Button } from "@/components/ui/button";
 import { Field, Input } from "@/components/ui/input";
 import {
@@ -14,6 +16,30 @@ import { formatCompactCurrency } from "@/lib/format";
 import { rupeesToPaise } from "@/lib/money";
 
 type Mode = "signin" | "signup";
+
+/**
+ * Failure codes from the Google callback, in words.
+ *
+ * The callback has no page of its own — its only outcomes are a session or a
+ * redirect back to this form — so without this map a failed round trip would
+ * return the user to an unchanged sign-in screen with no explanation at all.
+ *
+ * Deliberately vague about *why* a state check failed: telling an attacker
+ * whether their forged callback matched a real session is not useful to anyone
+ * else.
+ */
+const GOOGLE_ERRORS: Record<string, string> = {
+  google_unconfigured:
+    "Google sign-in is not configured on this deployment yet. Use your email and password for now.",
+  google_cancelled: "Google sign-in was cancelled.",
+  google_state: "That Google sign-in attempt expired. Please try again.",
+  google_no_code: "Google did not complete the sign-in. Please try again.",
+  google_email_unverified:
+    "Google has not verified the email address on that account, so it cannot be used to sign in here.",
+  google_exchange_failed: "Could not complete Google sign-in. Please try again.",
+  google_profile_failed: "Could not read your Google profile. Please try again.",
+  google_failed: "Could not complete Google sign-in. Please try again.",
+};
 
 const MIN_DEPOSIT_LABEL = formatCompactCurrency(rupeesToPaise(MIN_INITIAL_DEPOSIT_RUPEES));
 const MAX_DEPOSIT_LABEL = formatCompactCurrency(rupeesToPaise(MAX_TOTAL_DEPOSIT_RUPEES));
@@ -37,24 +63,42 @@ const DEFAULT_PRESET = 10_000;
 export function AuthForm({
   initialMode = "signin",
   next,
+  errorCode,
 }: {
   initialMode?: Mode;
   /** Where to land after signing in. Already validated by the page. */
   next?: string;
+  /**
+   * A short failure code from the Google callback, which redirects here rather
+   * than rendering a page of its own.
+   */
+  errorCode?: string;
 }) {
   const router = useRouter();
 
   const [mode, setMode] = useState<Mode>(initialMode);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
   const [name, setName] = useState("");
 
   /** `null` means the custom field is in use; otherwise the chosen preset. */
   const [preset, setPreset] = useState<number | null>(DEFAULT_PRESET);
   const [customDeposit, setCustomDeposit] = useState(String(DEFAULT_PRESET));
 
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(
+    errorCode ? (GOOGLE_ERRORS[errorCode] ?? GOOGLE_ERRORS.google_failed!) : null,
+  );
   const [pending, setPending] = useState(false);
+
+  /**
+   * Set when the server says this address still needs confirming — either
+   * because sign-up has just finished, or because sign-in was refused for it.
+   * Carries the wording the server chose, and unlocks the resend action.
+   */
+  const [verificationNotice, setVerificationNotice] = useState<string | null>(null);
+  const [resendNotice, setResendNotice] = useState<string | null>(null);
+  const [resending, setResending] = useState(false);
 
   const isSignUp = mode === "signup";
   const deposit = preset ?? Number(customDeposit);
@@ -64,6 +108,13 @@ export function AuthForm({
     if (pending) return;
 
     if (isSignUp) {
+      // Immediate feedback only; the server does not receive this field and
+      // does not need to — it is a guard against mistyping, not a credential.
+      if (password !== confirmation) {
+        setError("Those passwords do not match.");
+        return;
+      }
+
       if (
         !Number.isFinite(deposit) ||
         deposit < MIN_INITIAL_DEPOSIT_RUPEES ||
@@ -78,6 +129,7 @@ export function AuthForm({
 
     setPending(true);
     setError(null);
+    setResendNotice(null);
 
     try {
       const response = await fetch("/api/auth", {
@@ -91,16 +143,43 @@ export function AuthForm({
         }),
       });
 
-      const payload = (await response.json()) as { message?: string };
+      const payload = (await response.json()) as {
+        message?: string;
+        verificationRequired?: boolean;
+      };
 
       if (!response.ok) {
+        // Sign-in refused because the address is unconfirmed. Not an error the
+        // user can fix by retyping, so it gets its own state with a way out
+        // rather than a red line under the form.
+        if (payload.verificationRequired) {
+          setPassword("");
+          setVerificationNotice(payload.message ?? "Confirm your email address to sign in.");
+          setPending(false);
+          return;
+        }
+
         setError(payload.message ?? "Could not sign you in.");
         setPending(false);
         return;
       }
 
-      // Clear the password from state before navigating away.
+      // Clear the password from state before rendering anything else.
       setPassword("");
+      setConfirmation("");
+
+      /*
+        Sign-up no longer ends in a session: the address is unproven until the
+        emailed link is opened. So it ends on the "check your inbox" panel
+        instead of on the dashboard.
+      */
+      if (payload.verificationRequired) {
+        setVerificationNotice(
+          payload.message ?? "Check your email for a confirmation link, then sign in.",
+        );
+        setPending(false);
+        return;
+      }
 
       router.replace(next ?? "/dashboard");
       router.refresh();
@@ -108,6 +187,88 @@ export function AuthForm({
       setError("Could not reach the server.");
       setPending(false);
     }
+  }
+
+  /** Ask for another confirmation email. Cooled down and rate limited server-side. */
+  async function resendVerification() {
+    if (resending) return;
+
+    setResending(true);
+    setResendNotice(null);
+
+    try {
+      const response = await fetch("/api/auth/resend-verification", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+
+      const payload = (await response.json()) as { message?: string };
+      setResendNotice(payload.message ?? "If that address needs confirming, a new link is on its way.");
+    } catch {
+      setResendNotice("Could not reach the server.");
+    } finally {
+      setResending(false);
+    }
+  }
+
+  /*
+    The "confirm your email" panel.
+
+    Reached from two places — a finished sign-up, and a sign-in refused for an
+    unconfirmed address — and says the same thing in both, because it is the
+    same situation from the user's point of view.
+  */
+  if (verificationNotice) {
+    return (
+      <div className="w-full max-w-[26rem]">
+        <span className="eyebrow text-ink-tertiary">Confirm your email</span>
+
+        <h1 className="mt-5 text-[2rem] leading-[1.05] tracking-[-0.03em] sm:text-[2.25rem]">
+          Check your inbox
+        </h1>
+
+        <p className="mt-4 text-[0.875rem] leading-relaxed text-ink-secondary">
+          {verificationNotice}
+        </p>
+
+        <p className="mt-4 text-[0.8125rem] leading-relaxed text-ink-tertiary">
+          The link expires in 24 hours and can be used once. If nothing arrives, check your spam
+          folder before requesting another.
+        </p>
+
+        {resendNotice ? (
+          <p className="mt-6 text-[0.8125rem] text-ink-secondary" role="status">
+            {resendNotice}
+          </p>
+        ) : null}
+
+        <Button
+          type="button"
+          variant="secondary"
+          size="lg"
+          className="mt-8 w-full"
+          disabled={resending}
+          onClick={resendVerification}
+        >
+          {resending ? "Sending…" : "Resend confirmation email"}
+        </Button>
+
+        <p className="mt-6 text-[0.8125rem] text-ink-secondary">
+          <button
+            type="button"
+            className="cursor-pointer text-ink underline-offset-4 transition-opacity duration-200 hover:opacity-70 hover:underline"
+            onClick={() => {
+              setVerificationNotice(null);
+              setResendNotice(null);
+              setMode("signin");
+            }}
+          >
+            Back to sign in
+          </button>
+        </p>
+      </div>
+    );
   }
 
   return (
@@ -148,15 +309,50 @@ export function AuthForm({
           onChange={(event) => setEmail(event.target.value)}
         />
 
-        <Input
-          label="Password"
-          type="password"
-          required
-          autoComplete={isSignUp ? "new-password" : "current-password"}
-          placeholder={isSignUp ? "At least 10 characters" : "••••••••••"}
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-        />
+        <div>
+          <Input
+            label="Password"
+            type="password"
+            required
+            autoComplete={isSignUp ? "new-password" : "current-password"}
+            placeholder={isSignUp ? "At least 10 characters" : "••••••••••"}
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+
+          {/*
+            Sign-in only. On the sign-up form there is no password to have
+            forgotten, and the link would just be an extra way out of a form
+            someone has started filling in.
+          */}
+          {isSignUp ? null : (
+            <p className="mt-2.5 text-right">
+              <Link
+                href="/forgot-password"
+                className="text-[0.75rem] text-ink-tertiary underline-offset-4 transition-colors duration-200 hover:text-ink hover:underline"
+              >
+                Forgot password?
+              </Link>
+            </p>
+          )}
+        </div>
+
+        {isSignUp ? (
+          <Input
+            label="Confirm password"
+            type="password"
+            required
+            autoComplete="new-password"
+            placeholder="Type it again"
+            value={confirmation}
+            onChange={(event) => setConfirmation(event.target.value)}
+            error={
+              confirmation.length > 0 && confirmation !== password
+                ? "Those passwords do not match."
+                : undefined
+            }
+          />
+        ) : null}
 
         {isSignUp ? (
           <Field
@@ -271,6 +467,16 @@ export function AuthForm({
           </span>
         )}
       </Button>
+
+      {/*
+        The provider option, below the form it is an alternative to.
+
+        Placed after the submit button rather than above the fields: the
+        password form is the primary path for existing users, and a provider
+        button at the top pushes it below the fold on a phone.
+      */}
+      <AuthDivider className="mt-8" />
+      <GoogleButton next={next} className="mt-6" />
 
       <p className="mt-6 text-[0.8125rem] text-ink-secondary">
         {isSignUp ? "Already have an account?" : "No account yet?"}{" "}

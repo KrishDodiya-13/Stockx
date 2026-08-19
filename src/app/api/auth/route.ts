@@ -8,6 +8,7 @@ import { MAX_TOTAL_DEPOSIT_RUPEES, MIN_INITIAL_DEPOSIT_RUPEES } from "@/domain/c
 import { formatCurrency } from "@/lib/format";
 import { rupeesToPaise } from "@/lib/money";
 import { isDatabaseConfigured, prisma } from "@/lib/prisma";
+import { sendVerificationEmail } from "@/services/auth/verification-mailer";
 import {
   hashPassword,
   validateEmail,
@@ -161,20 +162,45 @@ export async function POST(request: Request) {
           email,
           name: typeof body.name === "string" ? body.name.trim().slice(0, 80) || null : null,
           passwordHash: await hashPassword(password),
+          // Unverified until the emailed link is opened. The account below is
+          // still created and funded exactly as before — verification gates
+          // signing in, not owning an account.
         },
         select: { id: true },
       });
 
       await createAccountForUser(user.id, rupeesToPaise(deposit.rupees));
-      await createSession(user.id, request.headers.get("user-agent") ?? undefined);
 
-      return NextResponse.json({ ok: true }, { status: 201 });
+      /*
+        No session is issued at sign-up any more.
+
+        The address has not been proven yet, and handing out a session here
+        would make verification decorative: the new user would already be
+        inside the application and would never need to open the email. They
+        confirm, then sign in.
+      */
+      await sendVerificationEmail(user.id, email);
+
+      return NextResponse.json(
+        {
+          ok: true,
+          verificationRequired: true,
+          message:
+            "Account created. Check your email for a confirmation link, then sign in.",
+        },
+        { status: 201 },
+      );
     }
 
     // --- sign in ----------------------------------------------------------
     const user = await prisma.user.findUnique({
       where: { email },
-      select: { id: true, passwordHash: true, accounts: { select: { id: true }, take: 1 } },
+      select: {
+        id: true,
+        passwordHash: true,
+        emailVerifiedAt: true,
+        accounts: { select: { id: true }, take: 1 },
+      },
     });
 
     /*
@@ -195,6 +221,31 @@ export async function POST(request: Request) {
       return NextResponse.json(
         { error: "invalid_credentials", message: "That email and password do not match." },
         { status: 401 },
+      );
+    }
+
+    /*
+      An unverified address cannot sign in.
+
+      Checked *after* the password, deliberately. Reporting "unverified" to
+      someone who has not proved they know the password would tell a stranger
+      that the address is registered — the same enumeration the shared failure
+      message above exists to prevent. Getting here means the password was
+      right, so the account is theirs and the specific reason is safe to give.
+
+      Every account that predates this feature was marked verified in the
+      migration, so nobody is refused for a check that did not exist when they
+      registered.
+    */
+    if (!user.emailVerifiedAt) {
+      return NextResponse.json(
+        {
+          error: "email_unverified",
+          message:
+            "Confirm your email address before signing in. Check your inbox for the link, or request a new one.",
+          verificationRequired: true,
+        },
+        { status: 403 },
       );
     }
 

@@ -121,4 +121,65 @@ export const serverEnv = {
     assertServer();
     return process.env.ANALYSIS_API_KEY;
   },
+  /**
+   * Google OAuth client id, from the Google Cloud Console.
+   *
+   * Not a secret in the strict sense — it is sent to the browser as part of the
+   * authorise redirect — but it is read here rather than exposed as a
+   * NEXT_PUBLIC_ variable so the client id and its secret stay together, and so
+   * the "is Google sign-in available" question has one answer computed on the
+   * server.
+   */
+  get googleClientId(): string | undefined {
+    assertServer();
+    return sanitiseToken(process.env.GOOGLE_CLIENT_ID);
+  },
+  /** Google OAuth client secret. Never leaves the server. */
+  get googleClientSecret(): string | undefined {
+    assertServer();
+    return sanitiseToken(process.env.GOOGLE_CLIENT_SECRET);
+  },
+  /**
+   * Resend API key, for transactional email (currently password resets only).
+   *
+   * Optional. Without it no email is sent and the password-reset route still
+   * returns its usual generic response — the flow degrades to "no mail
+   * arrives", not to an error that would tell a stranger whether an address is
+   * registered.
+   */
+  get resendApiKey(): string | undefined {
+    assertServer();
+    return sanitiseToken(process.env.RESEND_API_KEY);
+  },
+  /**
+   * The From address for transactional email, e.g.
+   * `STOCKX <no-reply@yourdomain.com>`. Its domain must be verified with the
+   * email provider or every send is rejected.
+   */
+  get emailFrom(): string | undefined {
+    assertServer();
+    return process.env.EMAIL_FROM?.trim() || undefined;
+  },
+  /**
+   * The app's own public origin, used to build absolute links in email.
+   *
+   * A reset link cannot be a relative path, and it must not be built from the
+   * request's `Host` header: that header is attacker-controlled, and trusting
+   * it is how a reset email ends up pointing at someone else's server with a
+   * live token attached. So the origin is configuration, never input.
+   *
+   * Falls back to Vercel's own deployment URL, then to localhost for
+   * development.
+   */
+  get appUrl(): string {
+    assertServer();
+
+    const configured = process.env.APP_URL?.trim();
+    if (configured) return configured.replace(/\/+$/, "");
+
+    const vercel = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL;
+    if (vercel) return `https://${vercel.replace(/^https?:\/\//, "").replace(/\/+$/, "")}`;
+
+    return "http://localhost:3000";
+  },
 } as const;

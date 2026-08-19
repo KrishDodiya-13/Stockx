@@ -46,6 +46,31 @@ export interface RateLimit {
 export const LIMITS = {
   signIn: { limit: 8, windowMs: 15 * 60_000 },
   signUp: { limit: 5, windowMs: 60 * 60_000 },
+  /*
+    Password reset.
+
+    Requesting is tighter than signing in: each accepted request sends mail to
+    somebody, so an unthrottled form is a way to flood a stranger's inbox from
+    this app's sending domain. `password-reset.ts` adds a per-account cooldown
+    on top, which — unlike this counter — survives a restart and applies across
+    instances.
+
+    Submitting is separate and looser. It is guessing a 256-bit token, which no
+    rate limit meaningfully protects; the cap is there to stop the endpoint
+    being used as free scrypt work.
+  */
+  passwordResetRequest: { limit: 5, windowMs: 60 * 60_000 },
+  passwordResetSubmit: { limit: 10, windowMs: 15 * 60_000 },
+  /*
+    Verification email resends, and the OAuth round trip.
+
+    `verificationResend` is a mail-sending route, so it is capped like the
+    reset request. `oauthStart` is not sensitive in itself, but an unbounded
+    redirect endpoint is a convenient open redirector to hammer, and the
+    callback does real database work.
+  */
+  verificationResend: { limit: 5, windowMs: 60 * 60_000 },
+  oauthStart: { limit: 20, windowMs: 15 * 60_000 },
   deposit: { limit: 20, windowMs: 60 * 60_000 },
   order: { limit: 60, windowMs: 60_000 },
   strategyRun: { limit: 120, windowMs: 60_000 },

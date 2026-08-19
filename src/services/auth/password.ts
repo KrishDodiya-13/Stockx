@@ -157,6 +157,90 @@ export function hashSessionToken(token: string): string {
   return createHash("sha256").update(token).digest("base64url");
 }
 
+/**
+ * A single-use token for an emailed link, and the value stored for it.
+ *
+ * Deliberately the same construction as the session token above, for the same
+ * reason: 256 bits from the OS CSPRNG, stored only as a SHA-256 digest. The
+ * token is not derived from the user id, the email, the clock, or anything
+ * else an attacker could reconstruct — those are all *guessable* given one
+ * leaked example, which is exactly the failure an emailed link cannot afford.
+ *
+ * SHA-256 rather than scrypt is right here for the same reason it is right for
+ * sessions: the token already carries full entropy, so there is no low-entropy
+ * secret to slow an attacker down over, and paying scrypt's cost on every link
+ * click would buy nothing.
+ */
+export function createLinkToken(): string {
+  assertServer();
+  return randomBytes(32).toString("base64url");
+}
+
+export function hashLinkToken(token: string): string {
+  assertServer();
+  return createHash("sha256").update(token).digest("base64url");
+}
+
+/** Digits in a one-time code. Six is what people will retype from an email. */
+export const OTP_LENGTH = 6;
+
+/**
+ * A six-digit one-time code.
+ *
+ * ── Why the modulo is rejected rather than taken ───────────────────────────
+ *
+ * `randomBytes(4) % 1000000` is the obvious construction and it is biased:
+ * 2^32 is not a multiple of a million, so the low codes come up slightly more
+ * often than the high ones. The bias is small, but it is free to avoid — draw
+ * again when the sample lands in the short tail, and every code is equally
+ * likely.
+ *
+ * ── Why six digits is enough here, and only here ───────────────────────────
+ *
+ * A million possibilities is nothing on its own. It is defensible because the
+ * code lives for ten minutes, dies after a handful of wrong guesses, and is
+ * scoped to one account — so an attacker gets a few tries at one target, not
+ * unlimited tries at everyone. Remove any one of those three and six digits
+ * would be indefensible.
+ */
+export function createOtpCode(): string {
+  assertServer();
+
+  const ceiling = 10 ** OTP_LENGTH;
+  // The largest multiple of `ceiling` that fits in 2^32; samples at or above
+  // it are discarded rather than folded back in.
+  const limit = Math.floor(0xffffffff / ceiling) * ceiling;
+
+  let sample = 0;
+  do {
+    sample = randomBytes(4).readUInt32BE(0);
+  } while (sample >= limit);
+
+  return String(sample % ceiling).padStart(OTP_LENGTH, "0");
+}
+
+/**
+ * The value stored for a one-time code.
+ *
+ * Bound to the user id, which matters more than it looks. A bare SHA-256 of
+ * six digits is a table of a million entries an attacker could precompute
+ * once and reverse every code in a stolen database instantly. Mixing in the
+ * (unguessable, per-row) user id means that table would have to be rebuilt per
+ * account, which is the whole point of salting.
+ */
+export function hashOtpCode(userId: string, code: string): string {
+  assertServer();
+  return createHash("sha256").update(`${userId}:${code}`).digest("base64url");
+}
+
+/** Constant-time comparison of two stored digests. */
+export function digestsMatch(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
+}
+
 export interface PasswordRule {
   readonly ok: boolean;
   readonly message: string | null;
