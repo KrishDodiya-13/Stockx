@@ -496,6 +496,8 @@ export function AuthForm({
         STOCKX is a paper-trading simulator. All balances, orders and P&L are virtual. Nothing here
         places a real trade or moves real money.
       </p>
+
+      <p className="mt-3 text-[0.6875rem] text-ink-tertiary">App created by Krish Dodiya</p>
     </form>
   );
 }
