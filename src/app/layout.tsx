@@ -55,6 +55,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <CursorProvider>{children}</CursorProvider>
           </SmoothScrollProvider>
         </ThemeProvider>
+
+        <span className="pointer-events-none fixed bottom-2 right-3 z-50 text-[0.625rem] text-ink-tertiary/60">
+          App created by Krish Dodiya
+        </span>
       </body>
     </html>
   );
